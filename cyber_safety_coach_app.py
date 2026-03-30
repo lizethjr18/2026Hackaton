@@ -114,24 +114,33 @@ DEMO_SIGNALS = [
 
 
 def redact_pii(text: str) -> str:
-    """Redact a few common forms of personally identifiable information."""
+    """Redact common PII while avoiding destroying the phishing context."""
     patterns = [
+        # SSNs (XXX-XX-XXXX or XXXXXXXXX)
+        (
+            r"\b\d{3}[-.\s]?\d{2}[-.\s]?\d{4}\b",
+            "[REDACTED_SSN]",
+        ),
+        # Phone numbers
         (
             r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b",
             "[REDACTED_PHONE]",
         ),
+        # Credit Card numbers
         (
             r"\b(?:\d[ -]*?){13,16}\b",
             "[REDACTED_CARD]",
         ),
-        (
-            r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b",
-            "[REDACTED_NAME]",
-        ),
+        # Email addresses
         (
             r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
             "[REDACTED_EMAIL]",
         ),
+        # Names (Catches greetings and sign-offs, handles commas)
+        (
+            r"(?i)(dear|sincerely|regards|hello|hi|best|thanks|cheers)\s*[,]?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?",
+            r"\1 [REDACTED_NAME]", 
+        )
     ]
 
     redacted = text
@@ -276,6 +285,7 @@ def main() -> None:
         <style>
         .stApp {
             background: linear-gradient(180deg, #F6FBFF 0%, #FFFFFF 45%, #F8FAFC 100%);
+            color: #0F172A;
         }
         .hero-card {
             background: #ffffff;
@@ -309,6 +319,9 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
+    
+    
+
 
     st.write("")
     user_text = st.text_area(
