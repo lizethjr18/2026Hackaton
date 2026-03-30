@@ -307,6 +307,14 @@ def main() -> None:
         st.write("For best privacy, avoid pasting passwords, account numbers, or private files.")
         st.divider()
         st.caption("Tip: You can paste either an email message or a suspicious website link.")
+        # --- STRETCH GOAL: TEACH-BACK LESSON ---
+        st.divider()
+        st.subheader("💡 Cyber Safety Tip")
+        st.info(
+            "**The 'Hover' Rule:**\n\n"
+            "Before clicking a link in an email, hover your mouse over it without clicking. "
+            "Look at the bottom-left corner of your browser. Does the URL actually match the company name?"
+        )
 
     st.markdown(
         """
@@ -324,8 +332,24 @@ def main() -> None:
 
 
     st.write("")
+    # --- DEMO BUTTONS ---
+    st.write("Or try a sample message:")
+    if "sample_text" not in st.session_state:
+        st.session_state.sample_text = ""
+
+    col_btn1, col_btn2, col_btn3 = st.columns(3)
+    with col_btn1:
+        if st.button("🟢 Load 'Safe' Sample", use_container_width=True):
+            st.session_state.sample_text = "Hi Professor Davis,\n\nJust a quick reminder that our weekly project meeting is scheduled for tomorrow at 10:00 AM in the main conference room. I have attached the syllabus draft for your review.\n\nLet me know if you have any questions before the weekend!\n\nBest, Brian"
+    with col_btn2:
+        if st.button("🟡 Load 'Suspicious' Sample", use_container_width=True):
+            st.session_state.sample_text = "Hello Alice,\n\nWe noticed an unusual login attempt on your account from a new device. Please review your recent activity when you have a moment.\n\nIf this was not you, you may want to update your security settings.\n\nBest,\nSupport Team"
+    with col_btn3:
+        if st.button("🔴 Load 'High Risk' Sample", use_container_width=True):
+            st.session_state.sample_text = "Dear John Smith,\n\nYour university email account (john.smith@university.edu) will be suspended within 24 hours due to a security alert. We need you to verify your account immediately.\n\nPlease click here to sign in and confirm your password: http://secure-update-portal-login.com/auth\n\nIf you do not act now, you will lose access to your classes.\n\nRegards, IT Helpdesk 1-800-555-0199"
     user_text = st.text_area(
         "Paste email text or a URL",
+        value=st.session_state.sample_text,
         height=240,
         placeholder="Example: Dear customer, your package is delayed. Click here to confirm your payment details...",
     )
@@ -350,9 +374,16 @@ def main() -> None:
             used_demo_mode = True
             result = analyze_text_demo(redacted_text)
             st.info("OpenAI analysis was unavailable, so this result was generated using local demo-mode safety rules.")
-            st.caption(f"Technical details: {exc}")
+            #st.caption(f"Technical details: {exc}")         We do not need technical details to be displayed on the web app, it can look like the application broke.
 
         render_risk_label(result["risk_label"])
+        # --- STRETCH GOAL: CONFIDENCE SCORE ---
+        if used_demo_mode:
+            st.info("📊 **Confidence:** Low (Offline Demo Mode). Please verify through official channels.")
+        elif result["risk_label"] == "Safe":
+            st.success("📊 **Confidence:** Moderate. No obvious threats detected, but always stay alert.")
+        else:
+            st.warning("📊 **Confidence:** High. Multiple known threat signatures detected.")
 
         if used_demo_mode:
             st.caption("Demo mode is helpful for practice and presentations, but it is less nuanced than a live AI review.")
@@ -369,6 +400,27 @@ def main() -> None:
             for item in result["action_checklist"]:
                 st.markdown(f"- {item}")
 
+    # Report Generator 
+        st.divider()
+        st.subheader("📨 Report this Incident")
+        st.write("Generate a safe, plain-text summary to forward to your IT department or Helpdesk.")
+        
+        # Format the text for the download file
+        report_content = f"CYBER SAFETY INCIDENT REPORT\n"
+        report_content += f"Risk Level: {result['risk_label']}\n\n"
+        report_content += "Key Warning Signs:\n"
+        for reason in result['top_3_reasons']:
+            report_content += f"- {reason}\n"
+        report_content += f"\nRedacted Original Message:\n{redacted_text}\n"
+
+        # Streamlit download button
+        st.download_button(
+            label="Download IT Report (.txt)",
+            data=report_content,
+            file_name="cyber_incident_report.txt",
+            mime="text/plain",
+            icon="📥"
+        )
 
 if __name__ == "__main__":
     main()
