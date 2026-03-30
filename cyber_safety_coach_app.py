@@ -283,10 +283,32 @@ def main() -> None:
     st.markdown(
         """
         <style>
+        /* Force the main app background and text color */
         .stApp {
-            background: linear-gradient(180deg, #F6FBFF 0%, #FFFFFF 45%, #F8FAFC 100%);
-            color: #0F172A;
+            background: white !important;
+            color: #0F172A !important;
         }
+
+        /* Force the sidebar to be light */
+        [data-testid="stSidebar"] {
+            background-color: #F8FAFC !important;
+        }
+
+        /* Force all text inputs, text areas, and buttons to have dark text */
+        input, textarea, [role="button"] {
+            color: #0F172A !important;
+            background-color: white !important;
+        }
+
+        /* Ensure headers and secondary text stay dark */
+        h1, h2, h3, p, span, label {
+            color: #0F172A !important;
+        }
+
+        /* Hide the Streamlit header/menu to make it look like a standalone app */
+        header {visibility: hidden;}
+        #MainMenu {visibility: hidden;}
+
         .hero-card {
             background: #ffffff;
             border: 1px solid #DCE7F2;
@@ -298,7 +320,6 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
-
     with st.sidebar:
         st.header("Why this app is safe to use")
         st.write("Your text is redacted before analysis to remove common personal details.")
