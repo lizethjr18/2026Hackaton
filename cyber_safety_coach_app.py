@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -54,6 +55,7 @@ DEMO_SIGNALS = [
             "verify your account",
             "confirm your account",
             "sign in",
+            "one-time code",
         ],
         "It asks for login or account details, which is a common phishing tactic.",
     ),
@@ -67,6 +69,8 @@ DEMO_SIGNALS = [
             "payment details",
             "gift card",
             "wire transfer",
+            "invoice",
+            "pay now",
         ],
         "It asks for money or payment information in a risky way.",
     ),
@@ -81,6 +85,7 @@ DEMO_SIGNALS = [
             "suspended",
             "locked",
             "final notice",
+            "today",
         ],
         "It creates pressure to act fast before you can slow down and verify it.",
     ),
@@ -94,8 +99,10 @@ DEMO_SIGNALS = [
             "click here",
             "confirm here",
             "update here",
+            "scan this qr",
+            "qr code",
         ],
-        "It includes a link or click prompt that could lead to a fake website.",
+        "It includes a link or QR prompt that could lead to a fake website.",
     ),
     (
         "prize_or_threat",
@@ -107,40 +114,92 @@ DEMO_SIGNALS = [
             "lawsuit",
             "arrest",
             "security alert",
+            "penalty",
+            "account suspended",
         ],
         "It uses fear, rewards, or threats to influence your decision.",
     ),
 ]
 
+LESSON_BY_RISK = {
+    "Safe": "Even safe-looking messages deserve a quick pause. The safest habit is to sign in from an official website or app instead of using links inside messages.",
+    "Suspicious": "Scammers count on speed. If a message asks you to verify, pay, or fix something quickly, stop and confirm the request using a phone number or website you already trust.",
+    "High Risk": "High-risk phishing often mixes urgency with a link, QR code, or login request. Never use the contact details inside the message to verify it.",
+}
+
+SAFE_SAMPLE = (
+    "Hi Professor Davis,\n\n"
+    "Just a quick reminder that our weekly project meeting is scheduled for tomorrow at 10:00 AM "
+    "in the main conference room. I attached the syllabus draft for your review.\n\n"
+    "Best,\nBrian"
+)
+
+SUSPICIOUS_SAMPLE = (
+    "Hello Alice,\n\n"
+    "We noticed an unusual login attempt on your account from a new device. Please review your "
+    "recent activity when you have a moment.\n\n"
+    "If this was not you, you may want to update your security settings.\n\n"
+    "Best,\nSupport Team"
+)
+
+HIGH_RISK_SAMPLE = (
+    "Dear Maria Lopez,\n\n"
+    "Your university email account (maria.lopez24@email.com) will be suspended within 24 hours due "
+    "to a security alert. Please scan the QR code on the attached image or click "
+    "http://secure-update-portal-login.com/auth to verify your password immediately.\n\n"
+    "If you do not act now, you will lose access to your classes. Call 909-555-4821 if you have "
+    "questions.\n\nRegards,\nIT Helpdesk"
+)
+
+
+def validate_assessment(assessment: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(assessment, dict):
+        raise ValueError("Assessment is not a JSON object.")
+
+    risk_label = assessment.get("risk_label")
+    if risk_label not in OUTPUT_SCHEMA["properties"]["risk_label"]["enum"]:
+        raise ValueError(f"Invalid risk label: {risk_label!r}")
+
+    top_reasons = assessment.get("top_3_reasons")
+    if (
+        not isinstance(top_reasons, list)
+        or len(top_reasons) != 3
+        or any(not isinstance(item, str) for item in top_reasons)
+    ):
+        raise ValueError("top_3_reasons must be a list of 3 strings.")
+
+    action_checklist = assessment.get("action_checklist")
+    if (
+        not isinstance(action_checklist, list)
+        or len(action_checklist) < 3
+        or any(not isinstance(item, str) for item in action_checklist)
+    ):
+        raise ValueError("action_checklist must be a list of at least 3 strings.")
+
+    return {
+        "risk_label": risk_label,
+        "top_3_reasons": top_reasons,
+        "action_checklist": action_checklist,
+    }
+
 
 def redact_pii(text: str) -> str:
-    """Redact common PII while avoiding destroying the phishing context."""
+    """Redact common PII while preserving phishing context."""
     patterns = [
-        # SSNs (XXX-XX-XXXX or XXXXXXXXX)
-        (
-            r"\b\d{3}[-.\s]?\d{2}[-.\s]?\d{4}\b",
-            "[REDACTED_SSN]",
-        ),
-        # Phone numbers
+        (r"\b\d{3}[-.\s]?\d{2}[-.\s]?\d{4}\b", "[REDACTED_SSN]"),
         (
             r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b",
             "[REDACTED_PHONE]",
         ),
-        # Credit Card numbers
-        (
-            r"\b(?:\d[ -]*?){13,16}\b",
-            "[REDACTED_CARD]",
-        ),
-        # Email addresses
+        (r"\b(?:\d[ -]*?){13,16}\b", "[REDACTED_CARD]"),
         (
             r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
             "[REDACTED_EMAIL]",
         ),
-        # Names (Catches greetings and sign-offs, handles commas)
         (
-            r"(?i)(dear|sincerely|regards|hello|hi|best|thanks|cheers)\s*[,]?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?",
-            r"\1 [REDACTED_NAME]", 
-        )
+            r"(?i)(dear|sincerely|regards|hello|hi|best|thanks|cheers)\s*,?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?",
+            r"\1 [REDACTED_NAME]",
+        ),
     ]
 
     redacted = text
@@ -156,28 +215,39 @@ def build_client() -> OpenAI:
     return OpenAI(api_key=api_key)
 
 
-def analyze_text(redacted_text: str) -> dict[str, Any]:
+def analyze_with_openai(redacted_text: str, uploaded_image: Any | None) -> dict[str, Any]:
     client = build_client()
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+    content: list[dict[str, Any]] = [
+        {
+            "type": "input_text",
+            "text": (
+                "Review the suspicious content below. Return plain-language guidance for an everyday "
+                "user. Keep the reasons short, practical, and specific. If a QR code or image is "
+                "provided, treat it as potentially suspicious content.\n\n"
+                f"Redacted text input:\n{redacted_text or '[No text provided]'}"
+            ),
+        }
+    ]
+
+    if uploaded_image is not None:
+        encoded_image = base64.b64encode(uploaded_image.getvalue()).decode("utf-8")
+        mime_type = uploaded_image.type or "image/png"
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": f"data:{mime_type};base64,{encoded_image}",
+            }
+        )
+
     response = client.responses.create(
         model=model,
-        instructions="You are a Personal Cyber Safety Coach. Analyze this text for phishing or scams.",
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "Review the message below. Return plain-language guidance for an everyday user. "
-                            "Keep the reasons short and practical.\n\n"
-                            f"Text to analyze:\n{redacted_text}"
-                        ),
-                    }
-                ],
-            }
-        ],
+        instructions=(
+            "You are a Personal Cyber Safety Coach. Analyze suspicious text, website prompts, "
+            "screenshots, or QR-style prompts for phishing or scams."
+        ),
+        input=[{"role": "user", "content": content}],
         text={
             "format": {
                 "type": "json_schema",
@@ -193,11 +263,7 @@ def analyze_text(redacted_text: str) -> dict[str, Any]:
         raise RuntimeError("The model returned an empty response.")
 
     parsed = json.loads(raw_output)
-    return {
-        "risk_label": parsed["risk_label"],
-        "top_3_reasons": parsed["top_3_reasons"],
-        "action_checklist": parsed["action_checklist"],
-    }
+    return validate_assessment(parsed)
 
 
 def analyze_text_demo(redacted_text: str) -> dict[str, Any]:
@@ -234,21 +300,21 @@ def analyze_text_demo(redacted_text: str) -> dict[str, Any]:
 
     if risk_label == "High Risk":
         actions = [
-            "Do not click links, open attachments, or reply to the message.",
-            "Verify the request through an official website, app, or phone number you trust.",
-            "Delete or report the message if it looks fake after checking.",
+            "Do not click the link, scan the QR code, open attachments, or reply to the message.",
+            "Go directly to the official website or app by typing the address yourself, then verify whether the request is real.",
+            "Report the message to your IT helpdesk, school, or organization before deleting it.",
         ]
     elif risk_label == "Suspicious":
         actions = [
-            "Pause before acting and verify who sent it.",
-            "Check the link or sender carefully using an official source, not the message itself.",
-            "Avoid sharing passwords, codes, or payment details until you confirm it is real.",
+            "Pause before acting and verify who sent it using a trusted phone number or official website.",
+            "Do not use the contact details, links, or QR codes inside the message until you confirm they are real.",
+            "Avoid sharing passwords, one-time codes, or payment details until verification is complete.",
         ]
     else:
         actions = [
-            "Stay cautious and double-check the sender or website if anything feels off.",
-            "Use official websites or apps when signing in or making payments.",
-            "Keep avoiding messages that ask for passwords, one-time codes, or urgent payments.",
+            "Stay cautious and sign in through official websites or apps instead of message links whenever possible.",
+            "Double-check the sender or website if anything feels off before sharing personal information.",
+            "Keep avoiding requests for passwords, one-time codes, or urgent payments unless you independently verify them.",
         ]
 
     return {
@@ -258,25 +324,160 @@ def analyze_text_demo(redacted_text: str) -> dict[str, Any]:
     }
 
 
-def render_risk_label(risk_label: str) -> None:
-    style = RISK_STYLES.get(risk_label, RISK_STYLES["Suspicious"])
+def strengthen_actions(result: dict[str, Any], redacted_text: str, source_label: str) -> dict[str, Any]:
+    text = redacted_text.lower()
+    actions: list[str] = []
+
+    if "http://" in text or "https://" in text or "bit.ly" in text or "tinyurl" in text:
+        actions.append("Do not use the link in the message. Type the official website into your browser instead.")
+    if "qr" in text or source_label == "Image upload":
+        actions.append("Do not scan the QR code again until you verify where it leads using an official source.")
+    if any(token in text for token in ["password", "passcode", "login", "sign in", "one-time code"]):
+        actions.append("Do not enter your password or one-time code from this message into any page it suggests.")
+    if any(token in text for token in ["payment", "gift card", "bank account", "wire transfer", "credit card"]):
+        actions.append("Do not send money or payment details until you confirm the request through a trusted channel.")
+    if any(token in text for token in ["school", "student", "university", "campus", "class"]):
+        actions.append("Contact your school through the official student portal or IT helpdesk before taking any action.")
+
+    for item in result["action_checklist"]:
+        if item not in actions:
+            actions.append(item)
+
+    result["action_checklist"] = actions[:4]
+    return result
+
+
+def confidence_summary(used_demo_mode: bool, risk_label: str, has_image: bool) -> tuple[str, str]:
+    if used_demo_mode and has_image:
+        return (
+            "Low confidence",
+            "Offline mode cannot fully inspect screenshots or QR images, so the recommendation is based only on typed text and common warning signs.",
+        )
+    if used_demo_mode:
+        return (
+            "Moderate confidence",
+            "Offline mode checks reliable phishing patterns such as urgency, login requests, payment requests, suspicious links, and threats.",
+        )
+    if risk_label == "Safe":
+        return (
+            "Moderate confidence",
+            "The cloud model did not find strong scam signals, but safer verification habits are still recommended.",
+        )
+    return (
+        "High confidence",
+        "The cloud model found several coordinated scam signals and produced a more nuanced explanation than the offline fallback.",
+    )
+
+
+def render_feature_card(title: str, body: str, accent_class: str) -> None:
     st.markdown(
         f"""
-        <div style="
-            background:{style['bg']};
-            color:{style['fg']};
-            border-left:8px solid {style['border']};
-            border-radius:12px;
-            padding:18px 20px;
-            margin-bottom:12px;
-            font-size:1.6rem;
-            font-weight:700;
-        ">
-            Risk Label: {risk_label}
+        <div class="feature-card {accent_class}">
+            <div class="feature-title">{title}</div>
+            <div class="feature-body">{body}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_result_cards(items: list[str], title: str, card_class: str) -> None:
+    st.subheader(title)
+    for item in items:
+        st.markdown(
+            f"""
+            <div class="{card_class}">
+                <div class="result-card-text">{item}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def render_confidence_card(confidence_label: str, confidence_detail: str, used_demo_mode: bool) -> None:
+    tone_class = "mode-card mode-offline" if used_demo_mode else "mode-card mode-cloud"
+    st.markdown(
+        f"""
+        <div class="{tone_class}">
+            <div class="mode-pill">{'Offline Fallback' if used_demo_mode else 'Cloud Review'}</div>
+            <div class="mode-title">{confidence_label}</div>
+            <div class="mode-body">{confidence_detail}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_risk_label(risk_label: str) -> None:
+    style = RISK_STYLES.get(risk_label, RISK_STYLES["Suspicious"])
+    st.markdown(
+        f"""
+        <div class="risk-banner" style="
+            background:{style['bg']};
+            color:{style['fg']};
+            border:1px solid {style['border']};
+            box-shadow:0 14px 34px rgba(15, 23, 42, 0.08);
+        ">
+            <div class="risk-eyebrow">Assessment Result</div>
+            <div class="risk-mainline">
+                <span class="risk-chip" style="background:{style['border']};"></span>
+                <span>Risk Label: {risk_label}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_mode_summary(used_demo_mode: bool, has_image: bool) -> None:
+    st.subheader("How This Review Was Generated")
+    if used_demo_mode:
+        st.warning(
+            "Offline demo mode was used. It is strong for common phishing patterns, but it is less "
+            "nuanced than the cloud model for subtle social engineering."
+        )
+        if has_image:
+            st.info(
+                "Image support is best in cloud mode. Offline mode cannot inspect the uploaded image "
+                "directly, so this result is based on the typed text only."
+            )
+    else:
+        st.success(
+            "Cloud analysis was used. This mode can review both pasted text and uploaded screenshots, "
+            "including suspicious QR-style prompts inside images."
+        )
+
+
+def make_report_content(
+    result: dict[str, Any],
+    redacted_text: str,
+    source_label: str,
+    used_demo_mode: bool,
+    confidence_label: str,
+    confidence_detail: str,
+) -> str:
+    report_lines = [
+        "CYBER SAFETY INCIDENT REPORT",
+        f"Input Type: {source_label}",
+        f"Analysis Mode: {'Offline demo mode' if used_demo_mode else 'Cloud model'}",
+        f"Risk Level: {result['risk_label']}",
+        f"Confidence: {confidence_label}",
+        "",
+        "Confidence Notes:",
+        confidence_detail,
+    ]
+
+    report_lines.extend(["", "Key Warning Signs:"])
+
+    for reason in result["top_3_reasons"]:
+        report_lines.append(f"- {reason}")
+
+    report_lines.extend(["", "Recommended Next Steps:"])
+    for item in result["action_checklist"]:
+        report_lines.append(f"- {item}")
+
+    report_lines.extend(["", "Redacted Submitted Content:", redacted_text or "[No text provided]"])
+    return "\n".join(report_lines)
 
 
 def main() -> None:
@@ -284,146 +485,373 @@ def main() -> None:
         """
         <style>
         .stApp {
-            background: linear-gradient(180deg, #F6FBFF 0%, #FFFFFF 45%, #F8FAFC 100%);
+            background:
+                radial-gradient(circle at top left, rgba(13, 148, 136, 0.18), transparent 28%),
+                radial-gradient(circle at top right, rgba(59, 130, 246, 0.16), transparent 24%),
+                linear-gradient(180deg, #F3FAF9 0%, #FFFFFF 40%, #F8FAFC 100%);
             color: #0F172A;
         }
-        /* Hide the Streamlit header and top-right menu */
         header {visibility: hidden;}
         #MainMenu {visibility: hidden;}
-        
+        [data-testid="stSidebar"] > div:first-child {
+            background: linear-gradient(180deg, #0F172A 0%, #10233F 100%);
+        }
+        [data-testid="stSidebar"] * {
+            color: #E2E8F0;
+        }
+        [data-testid="stSidebar"] .stAlert {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.16);
+        }
         .hero-card {
-            background: #ffffff;
-            border: 1px solid #DCE7F2;
+            position: relative;
+            overflow: hidden;
+            background: linear-gradient(135deg, #0F172A 0%, #133B5C 58%, #0D9488 100%);
+            color: #F8FAFC;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 24px;
+            padding: 1.8rem;
+            box-shadow: 0 24px 60px rgba(15, 23, 42, 0.16);
+            margin-bottom: 1rem;
+        }
+        .hero-card::after {
+            content: "";
+            position: absolute;
+            width: 240px;
+            height: 240px;
+            right: -60px;
+            top: -90px;
+            background: radial-gradient(circle, rgba(255,255,255,0.24), transparent 65%);
+            border-radius: 999px;
+        }
+        .hero-eyebrow {
+            display: inline-block;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            background: rgba(255,255,255,0.14);
+            border: 1px solid rgba(255,255,255,0.16);
+            border-radius: 999px;
+            padding: 0.35rem 0.7rem;
+            margin-bottom: 0.75rem;
+        }
+        .hero-heading {
+            font-size: 2.35rem;
+            line-height: 1.05;
+            font-weight: 800;
+            margin: 0 0 0.55rem 0;
+            max-width: 680px;
+        }
+        .hero-copy {
+            font-size: 1.05rem;
+            line-height: 1.65;
+            color: rgba(248, 250, 252, 0.9);
+            max-width: 720px;
+            margin: 0;
+        }
+        .feature-card {
+            min-height: 132px;
+            border-radius: 20px;
+            padding: 1rem 1.05rem;
+            background: rgba(255, 255, 255, 0.86);
+            border: 1px solid #D9E5F2;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+            backdrop-filter: blur(6px);
+        }
+        .feature-teal { border-top: 4px solid #0D9488; }
+        .feature-blue { border-top: 4px solid #2563EB; }
+        .feature-amber { border-top: 4px solid #F59E0B; }
+        .feature-title {
+            font-size: 1rem;
+            font-weight: 700;
+            margin-bottom: 0.4rem;
+            color: #0F172A;
+        }
+        .feature-body {
+            color: #334155;
+            line-height: 1.55;
+            font-size: 0.96rem;
+        }
+        .section-label {
+            font-size: 0.82rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #0F766E;
+            font-weight: 700;
+            margin-top: 0.5rem;
+            margin-bottom: 0.55rem;
+        }
+        .input-shell {
+            background: rgba(255, 255, 255, 0.82);
+            border: 1px solid #D8E5EF;
+            border-radius: 22px;
+            padding: 1rem 1rem 0.25rem 1rem;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
+            margin-bottom: 1rem;
+        }
+        .risk-banner {
+            border-radius: 22px;
+            padding: 1rem 1.1rem;
+            margin: 0.75rem 0 1rem 0;
+        }
+        .risk-eyebrow {
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            opacity: 0.8;
+            margin-bottom: 0.35rem;
+        }
+        .risk-mainline {
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            font-size: 1.7rem;
+            font-weight: 800;
+        }
+        .risk-chip {
+            width: 14px;
+            height: 14px;
+            border-radius: 999px;
+            display: inline-block;
+        }
+        .mode-card {
+            border-radius: 20px;
+            padding: 1rem 1.1rem;
+            margin-bottom: 0.9rem;
+            border: 1px solid transparent;
+        }
+        .mode-cloud {
+            background: linear-gradient(180deg, #ECFDF5 0%, #F8FAFC 100%);
+            border-color: #86EFAC;
+        }
+        .mode-offline {
+            background: linear-gradient(180deg, #FFF7ED 0%, #FFFBEB 100%);
+            border-color: #FBBF24;
+        }
+        .mode-pill {
+            display: inline-block;
+            border-radius: 999px;
+            padding: 0.28rem 0.6rem;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin-bottom: 0.55rem;
+            background: rgba(15, 23, 42, 0.06);
+        }
+        .mode-title {
+            font-size: 1.08rem;
+            font-weight: 700;
+            color: #0F172A;
+            margin-bottom: 0.32rem;
+        }
+        .mode-body {
+            color: #334155;
+            line-height: 1.55;
+        }
+        .reason-card, .action-card {
             border-radius: 18px;
-            padding: 1.4rem;
-            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+            padding: 0.95rem 1rem;
+            margin-bottom: 0.8rem;
+            box-shadow: 0 10px 22px rgba(15, 23, 42, 0.05);
+            border: 1px solid #E2E8F0;
+            background: #FFFFFF;
+        }
+        .reason-card {
+            border-left: 5px solid #F59E0B;
+            background: linear-gradient(180deg, #FFFFFF 0%, #FFFDF7 100%);
+        }
+        .action-card {
+            border-left: 5px solid #0D9488;
+            background: linear-gradient(180deg, #FFFFFF 0%, #F7FFFD 100%);
+        }
+        .result-card-text {
+            color: #0F172A;
+            line-height: 1.58;
+            font-size: 0.97rem;
+        }
+        .teaching-card {
+            border-radius: 20px;
+            padding: 1rem 1.1rem;
+            background: linear-gradient(135deg, #EFF6FF 0%, #F8FAFC 100%);
+            border: 1px solid #BFDBFE;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+        }
+        .report-card {
+            border-radius: 20px;
+            padding: 1rem 1.1rem;
+            background: linear-gradient(135deg, #FAF5FF 0%, #FFFFFF 100%);
+            border: 1px solid #DDD6FE;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+        }
+        @media (max-width: 900px) {
+            .hero-heading {
+                font-size: 1.85rem;
+            }
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+    if "sample_text" not in st.session_state:
+        st.session_state.sample_text = ""
+
     with st.sidebar:
         st.header("Why this app is safe to use")
         st.write("Your text is redacted before analysis to remove common personal details.")
         st.write("This app does not save your submissions, results, or browsing history.")
-        st.write("If the API is unavailable, the app can switch to a local demo mode for classroom use.")
+        st.write("If the API is unavailable, the app switches to a local fallback that still catches common phishing patterns.")
         st.write("For best privacy, avoid pasting passwords, account numbers, or private files.")
         st.divider()
-        st.caption("Tip: You can paste either an email message or a suspicious website link.")
-        # --- STRETCH GOAL: TEACH-BACK LESSON ---
+        st.subheader("What we can analyze")
+        st.caption("Text, suspicious links, screenshots, and QR-style prompts.")
         st.divider()
-        st.subheader("💡 Cyber Safety Tip")
+        st.subheader("30-second safety tip")
         st.info(
-            "**The 'Hover' Rule:**\n\n"
-            "Before clicking a link in an email, hover your mouse over it without clicking. "
-            "Look at the bottom-left corner of your browser. Does the URL actually match the company name?"
+            "Before clicking a link or scanning a QR code, pause and verify where it leads using an "
+            "official website or app you trust."
         )
 
     st.markdown(
         """
         <div class="hero-card">
-            <h1 style="margin-bottom:0.25rem;">Cyber Safety Coach</h1>
-            <p style="font-size:1.05rem; margin-top:0;">
-                Paste a suspicious email or website link to get a simple, safety-first explanation.
+            <div class="hero-eyebrow">Privacy-first phishing guidance</div>
+            <h1 class="hero-heading">Cyber Safety Coach</h1>
+            <p class="hero-copy">
+                Paste suspicious text or upload a screenshot to get a clear scam assessment,
+                automatic privacy redaction, and specific next steps that everyday users can follow.
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    
-    
-
 
     st.write("")
-    # --- DEMO BUTTONS ---
-    st.write("Or try a sample message:")
-    if "sample_text" not in st.session_state:
-        st.session_state.sample_text = ""
+    st.markdown('<div class="section-label">How it works</div>', unsafe_allow_html=True)
+    story_col1, story_col2, story_col3 = st.columns(3)
+    with story_col1:
+        render_feature_card("1. Protect privacy", "Names, emails, phone numbers, and other common PII are redacted before analysis.", "feature-teal")
+    with story_col2:
+        render_feature_card("2. Analyze the threat", "The app reviews text and optional screenshots with cloud AI, or falls back to offline rules.", "feature-blue")
+    with story_col3:
+        render_feature_card("3. Recommend action", "Users get a simple risk label, specific next steps, and a report they can forward.", "feature-amber")
 
-    col_btn1, col_btn2, col_btn3 = st.columns(3)
-    with col_btn1:
-        if st.button("🟢 Load 'Safe' Sample", use_container_width=True):
-            st.session_state.sample_text = "Hi Professor Davis,\n\nJust a quick reminder that our weekly project meeting is scheduled for tomorrow at 10:00 AM in the main conference room. I have attached the syllabus draft for your review.\n\nLet me know if you have any questions before the weekend!\n\nBest, Brian"
-    with col_btn2:
-        if st.button("🟡 Load 'Suspicious' Sample", use_container_width=True):
-            st.session_state.sample_text = "Hello Alice,\n\nWe noticed an unusual login attempt on your account from a new device. Please review your recent activity when you have a moment.\n\nIf this was not you, you may want to update your security settings.\n\nBest,\nSupport Team"
-    with col_btn3:
-        if st.button("🔴 Load 'High Risk' Sample", use_container_width=True):
-            st.session_state.sample_text = "Dear John Smith,\n\nYour university email account (john.smith@university.edu) will be suspended within 24 hours due to a security alert. We need you to verify your account immediately.\n\nPlease click here to sign in and confirm your password: http://secure-update-portal-login.com/auth\n\nIf you do not act now, you will lose access to your classes.\n\nRegards, IT Helpdesk 1-800-555-0199"
+    st.write("")
+    st.markdown('<div class="section-label">Demo scenarios</div>', unsafe_allow_html=True)
+    st.write("Load a sample to tell a stronger story during the demo:")
+    sample_col1, sample_col2, sample_col3 = st.columns(3)
+    with sample_col1:
+        if st.button("Load Safe Sample", use_container_width=True):
+            st.session_state.sample_text = SAFE_SAMPLE
+    with sample_col2:
+        if st.button("Load Suspicious Sample", use_container_width=True):
+            st.session_state.sample_text = SUSPICIOUS_SAMPLE
+    with sample_col3:
+        if st.button("Load High Risk Sample", use_container_width=True):
+            st.session_state.sample_text = HIGH_RISK_SAMPLE
+
+    st.markdown('<div class="section-label">Investigate a message</div>', unsafe_allow_html=True)
+    st.markdown('<div class="input-shell">', unsafe_allow_html=True)
     user_text = st.text_area(
-        "Paste email text or a URL",
+        "Paste email text, website text, or a suspicious URL",
         value=st.session_state.sample_text,
-        height=240,
-        placeholder="Example: Dear customer, your package is delayed. Click here to confirm your payment details...",
+        height=220,
+        placeholder="Example: Your account will be suspended today. Click here to verify your password...",
     )
+
+    uploaded_image = st.file_uploader(
+        "Optional: upload a screenshot or QR-style image",
+        type=["png", "jpg", "jpeg"],
+        help="Cloud mode can review uploaded images. Offline mode falls back to typed text only.",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if uploaded_image is not None:
+        st.image(uploaded_image, caption="Uploaded image for review", use_container_width=True)
 
     analyze_clicked = st.button("Analyze", type="primary", use_container_width=True)
 
     if analyze_clicked:
-        if not user_text.strip():
-            st.warning("Please paste email text or a URL before running the analysis.")
+        if not user_text.strip() and uploaded_image is None:
+            st.warning("Please paste suspicious text or upload an image before running the analysis.")
             return
 
         redacted_text = redact_pii(user_text.strip())
+        source_label = "Image upload" if uploaded_image is not None and not redacted_text else "Text and image"
+        if uploaded_image is None:
+            source_label = "Text input"
 
-        with st.expander("Preview redacted text sent to the AI", expanded=False):
-            st.code(redacted_text, language="text")
+        with st.expander("Preview redacted text used for analysis", expanded=False):
+            st.code(redacted_text or "[No text was provided.]", language="text")
 
         used_demo_mode = False
         try:
-            with st.spinner("Reviewing the message for scam and phishing signs..."):
-                result = analyze_text(redacted_text)
-        except Exception as exc:
+            with st.spinner("Reviewing the content for scam and phishing signs..."):
+                result = analyze_with_openai(redacted_text, uploaded_image)
+        except Exception:
             used_demo_mode = True
+            if not redacted_text:
+                st.error(
+                    "Offline mode needs typed text to analyze. Add a short description of the image or QR prompt and try again."
+                )
+                return
             result = analyze_text_demo(redacted_text)
-            st.info("OpenAI analysis was unavailable, so this result was generated using local demo-mode safety rules.")
-            #st.caption(f"Technical details: {exc}")         We do not need technical details to be displayed on the web app, it can look like the application broke.
+            st.info(
+                "OpenAI analysis was unavailable, so this result was generated using local offline safety rules."
+            )
+
+        result = strengthen_actions(result, redacted_text, source_label)
+        confidence_label, confidence_detail = confidence_summary(
+            used_demo_mode=used_demo_mode,
+            risk_label=result["risk_label"],
+            has_image=uploaded_image is not None,
+        )
 
         render_risk_label(result["risk_label"])
-        # --- STRETCH GOAL: CONFIDENCE SCORE ---
-        if used_demo_mode:
-            st.info("📊 **Confidence:** Low (Offline Demo Mode). Please verify through official channels.")
-        elif result["risk_label"] == "Safe":
-            st.success("📊 **Confidence:** Moderate. No obvious threats detected, but always stay alert.")
-        else:
-            st.warning("📊 **Confidence:** High. Multiple known threat signatures detected.")
-
-        if used_demo_mode:
-            st.caption("Demo mode is helpful for practice and presentations, but it is less nuanced than a live AI review.")
+        render_confidence_card(confidence_label, confidence_detail, used_demo_mode)
+        render_mode_summary(used_demo_mode, uploaded_image is not None)
 
         col1, col2 = st.columns(2, gap="large")
 
         with col1:
-            st.subheader("Top 3 Reasons")
-            for reason in result["top_3_reasons"]:
-                st.markdown(f"- {reason}")
+            render_result_cards(result["top_3_reasons"], "Top 3 Reasons", "reason-card")
 
         with col2:
-            st.subheader("Action Checklist")
-            for item in result["action_checklist"]:
-                st.markdown(f"- {item}")
+            render_result_cards(result["action_checklist"], "Specific Next Steps", "action-card")
 
-    # Report Generator 
         st.divider()
-        st.subheader("📨 Report this Incident")
-        st.write("Generate a safe, plain-text summary to forward to your IT department or Helpdesk.")
-        
-        # Format the text for the download file
-        report_content = f"CYBER SAFETY INCIDENT REPORT\n"
-        report_content += f"Risk Level: {result['risk_label']}\n\n"
-        report_content += "Key Warning Signs:\n"
-        for reason in result['top_3_reasons']:
-            report_content += f"- {reason}\n"
-        report_content += f"\nRedacted Original Message:\n{redacted_text}\n"
+        st.subheader("Quick Teaching Tip")
+        st.markdown(
+            f'<div class="teaching-card">{LESSON_BY_RISK[result["risk_label"]]}</div>',
+            unsafe_allow_html=True,
+        )
 
-        # Streamlit download button
+        st.divider()
+        st.subheader("Report This Incident")
+        st.markdown(
+            '<div class="report-card">Generate a plain-text summary to forward to IT, a helpdesk, or a teacher.</div>',
+            unsafe_allow_html=True,
+        )
+
+        report_content = make_report_content(
+            result=result,
+            redacted_text=redacted_text,
+            source_label=source_label,
+            used_demo_mode=used_demo_mode,
+            confidence_label=confidence_label,
+            confidence_detail=confidence_detail,
+        )
+
         st.download_button(
             label="Download IT Report (.txt)",
             data=report_content,
             file_name="cyber_incident_report.txt",
             mime="text/plain",
-            icon="📥"
         )
+
 
 if __name__ == "__main__":
     main()
