@@ -9,7 +9,7 @@ from openai import OpenAI
 
 
 st.set_page_config(
-    page_title="Cyber Safety Coach",
+    page_title="Scam Shield",
     page_icon="shield",
     layout="wide",
 )
@@ -433,13 +433,12 @@ def render_mode_summary(used_demo_mode: bool, has_image: bool) -> None:
     st.subheader("How This Review Was Generated")
     if used_demo_mode:
         st.warning(
-            "Offline demo mode was used. It is strong for common phishing patterns, but it is less "
-            "nuanced than the cloud model for subtle social engineering."
+            "Local Security Mode was used. The system applied reliable phishing checks without depending on cloud access."
         )
+        
         if has_image:
             st.info(
-                "Image support is best in cloud mode. Offline mode cannot inspect the uploaded image "
-                "directly, so this result is based on the typed text only."
+            "Image support is best in cloud mode. Offline mode cannot inspect the uploaded image directly, so this result uses conservative visual safety guidance instead."
             )
     else:
         st.success(
@@ -459,7 +458,7 @@ def make_report_content(
     report_lines = [
         "CYBER SAFETY INCIDENT REPORT",
         f"Input Type: {source_label}",
-        f"Analysis Mode: {'Offline demo mode' if used_demo_mode else 'Cloud model'}",
+        f"Analysis Mode: {'Local Heuristic Engine' if used_demo_mode else 'Cloud-Assisted Review'}",
         f"Risk Level: {result['risk_label']}",
         f"Confidence: {confidence_label}",
         "",
@@ -703,7 +702,7 @@ def main() -> None:
         st.header("Why this app is safe to use")
         st.write("Your text is redacted before analysis to remove common personal details.")
         st.write("This app does not save your submissions, results, or browsing history.")
-        st.write("If the API is unavailable, the app switches to a local fallback that still catches common phishing patterns.")
+        st.write("If cloud-assisted review is unavailable, the app switches to a local safety engine that still catches common phishing patterns.")
         st.write("For best privacy, avoid pasting passwords, account numbers, or private files.")
         st.divider()
         st.subheader("What we can analyze")
@@ -719,7 +718,7 @@ def main() -> None:
         """
         <div class="hero-card">
             <div class="hero-eyebrow">Privacy-first phishing guidance</div>
-            <h1 class="hero-heading">Cyber Safety Coach</h1>
+            <h1 class="hero-heading">Scam Shield</h1>
             <p class="hero-copy">
                 Paste suspicious text or upload a screenshot to get a clear scam assessment,
                 automatic privacy redaction, and specific next steps that everyday users can follow.
@@ -735,13 +734,13 @@ def main() -> None:
     with story_col1:
         render_feature_card("1. Protect privacy", "Names, emails, phone numbers, and other common PII are redacted before analysis.", "feature-teal")
     with story_col2:
-        render_feature_card("2. Analyze the threat", "The app reviews text and optional screenshots with cloud AI, or falls back to offline rules.", "feature-blue")
+        render_feature_card("2. Analyze the threat", "The system reviews content using privacy-first local heuristic rules, with optional cloud-assisted review when available.", "feature-blue")   
     with story_col3:
         render_feature_card("3. Recommend action", "Users get a simple risk label, specific next steps, and a report they can forward.", "feature-amber")
 
     st.write("")
-    st.markdown('<div class="section-label">Demo scenarios</div>', unsafe_allow_html=True)
-    st.write("Load a sample to tell a stronger story during the demo:")
+    st.markdown('<div class="section-label">Scenarios</div>', unsafe_allow_html=True)
+    st.write("Load a sample message to see how it works:")
     sample_col1, sample_col2, sample_col3 = st.columns(3)
     with sample_col1:
         if st.button("Load Safe Sample", use_container_width=True):
@@ -765,7 +764,7 @@ def main() -> None:
     uploaded_image = st.file_uploader(
         "Optional: upload a screenshot or QR-style image (small PNG/JPG only)",
         type=["png", "jpg", "jpeg"],
-        help="Cloud mode can review uploaded images. Offline mode falls back to typed text only. Use a small screenshot for cloud review. Large files may fail to upload.",
+        help="Cloud mode can review uploaded images. Offline mode cannot inspect image contents directly and uses conservative visual safety guidance instead.",
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
