@@ -331,7 +331,7 @@ def strengthen_actions(result: dict[str, Any], redacted_text: str, source_label:
     if "http://" in text or "https://" in text or "bit.ly" in text or "tinyurl" in text:
         actions.append("Do not use the link in the message. Type the official website into your browser instead.")
     if "qr" in text or source_label == "Image upload":
-        actions.append("Do not scan the QR code again until you verify where it leads using an official source.")
+        actions.append("Do not scan any QR code or open any link shown in the image until you verify it through an official source.")
     if any(token in text for token in ["password", "passcode", "login", "sign in", "one-time code"]):
         actions.append("Do not enter your password or one-time code from this message into any page it suggests.")
     if any(token in text for token in ["payment", "gift card", "bank account", "wire transfer", "credit card"]):
@@ -763,14 +763,18 @@ def main() -> None:
     )
 
     uploaded_image = st.file_uploader(
-        "Optional: upload a screenshot or QR-style image",
+        "Optional: upload a screenshot or QR-style image (small PNG/JPG only)",
         type=["png", "jpg", "jpeg"],
-        help="Cloud mode can review uploaded images. Offline mode falls back to typed text only.",
+        help="Cloud mode can review uploaded images. Offline mode falls back to typed text only. Use a small screenshot for cloud review. Large files may fail to upload.",
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
     if uploaded_image is not None:
-        st.image(uploaded_image, caption="Uploaded image for review", use_container_width=True)
+        if uploaded_image is not None and uploaded_image.size > 4 * 1024 * 1024:
+            st.warning("This image is too large for cloud review. Please upload a smaller PNG/JPG screenshot.")
+            return
+        else:
+            st.image(uploaded_image, caption="Uploaded image for review", use_container_width=True)
 
     analyze_clicked = st.button("Analyze", type="primary", use_container_width=True)
 
@@ -793,15 +797,34 @@ def main() -> None:
                 result = analyze_with_openai(redacted_text, uploaded_image)
         except Exception:
             used_demo_mode = True
-            if not redacted_text:
-                st.error(
-                    "Offline mode needs typed text to analyze. Add a short description of the image or QR prompt and try again."
+
+            # --- THE NEW ZERO-TRUST VISUAL FALLBACK ---
+            if not redacted_text and uploaded_image is not None:
+                st.warning(
+                    "Cloud analysis unavailable. Providing baseline visual safety protocols for unverified images."
                 )
+                result = {
+                    "risk_label": "Suspicious",
+                    "top_3_reasons": [
+                        "Offline mode cannot physically scan the contents of screenshots or QR codes.",
+                        "Scammers frequently use images and QR codes to hide malicious links from security scanners.",
+                        "Because offline mode cannot verify where image-based prompts or links lead, the content should be treated cautiously."
+                    ],
+                    "action_checklist": [
+                        "If the image claims to be from your school, bank, or employer, contact them through their official website or phone number.",
+                        "Verify the source of this message through a separate, trusted channel (like calling the sender).",
+                        "Wait until you have a secure network connection to re-scan this image."
+                    ]
+                }
+            elif not redacted_text:
+                st.error("Please provide text or an image to analyze.")
                 return
-            result = analyze_text_demo(redacted_text)
-            st.info(
-                "OpenAI analysis was unavailable, so this result was generated using local offline safety rules."
-            )
+            else:
+                # Standard text fallback
+                result = analyze_text_demo(redacted_text)
+                st.info(
+                    "OpenAI analysis was unavailable, so this result was generated using local offline safety rules."
+                )
 
         result = strengthen_actions(result, redacted_text, source_label)
         confidence_label, confidence_detail = confidence_summary(
